@@ -1,0 +1,146 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import tensorflow as tf
+from pandas_datareader import data as web
+import datetime
+import yfinance as yfin
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
+
+yfin.pdr_override()
+stocks = ['AAPL', 'MSFT', 'F', 'MBG.DE', 'GOOGL', 'AMZN', 'JPM', 'KO', 'BAC', 'MCD']
+stock_datas = []
+start = datetime.datetime(2009, 3, 31)
+end = datetime.datetime.now()
+
+for ticker in stocks:
+  data = web.get_data_yahoo(ticker, start, end)
+  data = data.reset_index()
+  del data['Adj Close']
+  del data['Date']
+  del data['Volume']
+  print(data.shape)
+  stock_datas.append(data)
+
+lowest = stock_datas[0].shape[0]
+for stock in stock_datas:
+  if stock.shape[0] < lowest:
+    lowest = stock.shape[0]
+
+for i in range(len(stock_datas)):
+  stock = stock_datas[i]
+  compression_ratio = len(stock) / lowest
+  print(compression_ratio)
+  group_indices = (stock.index // compression_ratio).astype(int)
+  print(group_indices)
+  compressed_df = stock.groupby(group_indices).agg('mean').reset_index(drop=True)
+  stock_datas[i] = compressed_df
+
+print(stock_datas[3].shape)
+plt.plot(stock_datas[3]['Close'])
+
+scaler=StandardScaler()
+#scaler = MinMaxScaler(feature_range=(0,1))
+
+data_training = []
+data_testing = []
+for stock in stock_datas:
+  data_training.append(scaler.fit_transform(pd.DataFrame(stock[0:int(len(stock) * 0.8)])))
+  data_testing.append(scaler.fit_transform(pd.DataFrame(stock[int(len(stock) * 0.8):])))
+
+print(len(data_training[3]))
+plt.plot(np.arange(len(data_training[3])), data_training[3])
+
+from tensorflow.keras import Model, Input, layers
+from tensorflow.keras.utils import plot_model
+
+# Define the number of stocks
+num_stocks = len(stocks)
+
+# Shared input layer
+shared_input_num = 10 * num_stocks
+shared_input_layer = Input(shape=(shared_input_num,))
+
+# Shared layers
+shared_layers = [shared_input_layer]
+shared_layers.append(layers.Dense(units=128, activation='tanh')(shared_layers[-1]))
+shared_layers.append(layers.Reshape((1, -1))(shared_input_layer))
+shared_layers.append(layers.LSTM(units=64, activation='tanh', return_sequences=True)(shared_layers[-1]))
+shared_layers.append(layers.LSTM(units=64, activation='tanh', return_sequences=False)(shared_layers[-1]))
+shared_layers.append(layers.Dense(units=10, activation='linear')(shared_layers[-1]))
+
+# Stock-specific layers and outputs
+stock_outputs = []
+specific_inputs = []
+
+for _ in range(num_stocks):
+    stock_specific_input = Input(shape=(num_stocks - 1,))  # Excluding the current stock
+
+    # Connect the last shared dense layer to the first stock-specific layer
+    first_stock_specific_hidden = layers.Dense(units=32, activation='tanh')(shared_layers[-1])
+    first_stock_specific_hidden = layers.Concatenate()([first_stock_specific_hidden, stock_specific_input])
+
+    stock_specific_hidden = layers.Dense(units=32, activation='tanh')(first_stock_specific_hidden)
+    stock_specific_hidden = layers.Dense(units=32, activation='tanh')(stock_specific_hidden)
+
+    stock_specific_output = layers.Dense(units=1, activation='linear')(stock_specific_hidden)
+
+    specific_inputs.append(stock_specific_input)
+    stock_outputs.append(stock_specific_output)
+
+# Create the model
+model = Model(inputs=[shared_input_layer] + [specific_input for specific_input in specific_inputs], outputs=stock_outputs)
+
+# Compile the model
+model.compile(optimizer='adam', loss='mean_squared_error', metrics=['mae'])
+
+plot_model(model, to_file='model_plot.png', show_shapes=True, show_layer_names=True)
+
+# Print model summary
+model.summary()
+plot_model(model, to_file='model.png', show_shapes=True, show_layer_names=True)
+
+def makeMA(data, days, i):
+  if i >= days-1:
+    return data[i-days:i].mean()
+  elif i != 0:
+    return data[:i].mean()
+  else:
+    return data[0]
+
+x_train = []
+y_train = []
+
+stockindex = 0
+for i in range(59, np.array(data_training).shape[1] - 1):
+    for stock in data_training:
+        day = stock[i, :]  # Access a specific day's data
+        x_sample = list(day)
+
+        # Calculate moving averages and append to the sample
+        x_sample.append(makeMA(stock.T[3], 5, i))
+        x_sample.append(makeMA(stock.T[3], 10, i))
+        x_sample.append(makeMA(stock.T[3], 20, i))
+        x_sample.append(makeMA(stock.T[3], 50, i))
+        x_sample.append(makeMA(stock.T[3], 100, i))
+        x_sample.append(makeMA(stock.T[3], 200, i))
+
+        x_train.append(x_sample)
+        y_train.append(stock.T[3][i+1])
+
+x_train, y_train = np.array(x_train), np.array(y_train)
+print("x_train shape:", x_train.shape)
+x_train = np.reshape(x_train, (-1, 10*len(stocks)))
+y_train = np.reshape(y_train, (-1, len(stocks)))
+
+for col_index in range(x_train.shape[1]):
+  plt.figure()  # Create a new figure for each stock
+  y = x_train[:, col_index]  # Access the entire column
+  x = np.arange(0, x_train.shape[0])
+  plt.plot(x, y, label=f'Column {col_index}')
+  plt.xlabel('Time')
+  plt.ylabel('Value')
+  plt.title(f'Plotting Different Columns for Stock {y}')
+  plt.legend()
+  plt.show()
+
